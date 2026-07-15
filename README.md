@@ -58,14 +58,12 @@ ai-hardware-agent-project/
 │       ├── compat/                         # 兼容层
 │       └── tools/                          # 工具集
 │           ├── build/                      #   构建工具
-│           │   ├── tools/
-│           │   │   ├── compiler/riscv/     #     交叉编译工具链
-│           │   │   └── ws63_link_v4.exe    #     固件链接器
+│           │   ├── compiler/riscv/         #     交叉编译工具链
+│           │   ├── ws63_link_v4.exe        #     固件链接器
 │           │   └── config/ws63/            #     链接脚本 & 配置文件
 │           └── burn/                       #   烧录工具
 │               └── hisi/
 │                   └── BurnTool_5.0.39/    #     BurnTool GUI
-└── tools/                                  # 辅助工具（来自 Examples 包）
 ```
 
 ---
@@ -113,7 +111,6 @@ ai-hardware-agent-examples
 │       │   └── burn/            #   烧录工具
 │       ├── init/                # 系统初始化
 │       └── compat/              # 兼容层
-└── tools/                       # 辅助工具
 ```
 
 ### 下载 SDK 包
@@ -150,7 +147,7 @@ cd ai-hardware-agent-examples
 tar -xvf /path/to/ai-hardware-agent-examples.tar
 ```
 
-解压后得到 `CMakeLists.txt`、`examples/`、`tools/`。
+解压后得到 `CMakeLists.txt`、`examples/`。
 
 ### 步骤 2：将 SDK 包解压到工程根目录
 
@@ -348,11 +345,11 @@ examples/goldieos/tools/burn/hisi/BurnTool_5.0.39/BurnTool/BurnTool.exe
 **烧录步骤：**
 
 1. **启动 BurnTool** — 双击 `BurnTool.exe`
-2. **配置参数** — 选择 COM 口 → 设置波特率（推荐 `921600`）
+2. **配置参数** — 设置波特率（推荐 `921600`） → 选择 COM 口 → 点击 Connect
 3. **加载固件** — 点击"Select file"，选择 `build/examples/goldieos/out/goldieos.fwpkg`
 4. **进入 ISP 模式** — 关机状态下按住 RESET → 接上 USB → 松开 RESET
-5. **执行烧录** — 点击"烧录"，等待完成
-6. **运行固件** — 按下开机按钮启动设备
+5. **执行烧录** — 点击"Send file"，等待完成
+6. **运行固件** — 长按开机按钮启动设备
 
 **硬件连接：** 使用 USB 转串口线连接 WS63 开发板，确认串口驱动已安装。
 
