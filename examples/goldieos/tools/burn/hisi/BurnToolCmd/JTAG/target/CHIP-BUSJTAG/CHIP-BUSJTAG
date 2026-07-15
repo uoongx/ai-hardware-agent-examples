@@ -1,0 +1,4 @@
+source [find target/CHIP-BUSJTAG/CHIP_target.cfg]
+init   
+$_CHIPNAME.dap apsel 2
+$_CHIPNAME.dap memaccess 8
