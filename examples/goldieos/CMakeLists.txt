@@ -175,8 +175,6 @@ if(EXISTS ${OPUS_DIR}/CMakeLists.txt)
     set(OPUS_ASM OFF CACHE BOOL "Disable assembly" FORCE)
     set(OPUS_INTRINSICS OFF CACHE BOOL "Disable intrinsics" FORCE)
     set(OPUS_DISABLE_FLOAT_API ON CACHE BOOL "Disable float API" FORCE)  # 纯定点可关闭浮点API
-    # 可选：OPUS_CUSTOM_MODES ON 如果需自定义编码模式
-    set(OPUS_DISABLE_FLOAT_API ON CACHE BOOL "Disable float API" FORCE)
     set(OPUS_ENABLE_FLOAT_API OFF CACHE BOOL "Enable float API" FORCE)
     set(OPUS_CUSTOM_MODES ON CACHE BOOL "Enable custom modes" FORCE)    
     set(OPUS_DRED OFF CACHE BOOL "Disable DRED" FORCE)                   # 关闭丢包隐藏（如果不需要）

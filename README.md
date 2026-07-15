@@ -1,6 +1,6 @@
-# ConvAI Examples 最佳实践
+# AI Hardware Agent Examples 最佳实践
 
-本文档基于华为 ConvAI SDK，指导开发者完成各平台的编译、烧录与运行。
+本文档基于华为 AI Hardware Agent SDK，指导开发者完成各平台的编译、烧录与运行。
 
 ---
 
@@ -18,25 +18,25 @@
 
 ## 概述
 
-ConvAI SDK 采用 **SDK 与 Examples 分离发布** 的模式：
+AI Hardware Agent SDK 采用 **SDK 与 Examples 分离发布** 的模式：
 
 | 组件 | 说明 | 发布形式 |
 |------|------|----------|
-| **ConvAI SDK** | 核心库（含 `libconvai_sdk.a` + 公共头文件） | `convai_sdk-<version>.tar` |
-| **Examples** | 平台示例代码（含 GoldieOS 等 demo 应用） | `convai_examples-<version>.tar` |
+| **AI Hardware Agent SDK** | 核心库（含 `libconvai_sdk.a` + 公共头文件） | `ai-hardware-agent-sdk-<version>.tar` |
+| **Examples** | 平台示例代码（含 GoldieOS demo 应用） | `ai-hardware-agent-examples-<version>.tar` |
 
 SDK 的 `include/` 和 `libs/` 放在工程根目录，供各平台共用。
 
 最终集成后的目录结构：
 
 ```
-convai-project/
-├── include/convai/                         # SDK 公共头文件（来自 SDK 包，各平台共用）
+ai-hardware-agent-project/
+├── include/convai/                         # SDK 公共头文件（来自 SDK 包）
 │   ├── convai_api.h
 │   ├── convai_event.h
 │   ├── convai_platform.h
 │   └── convai_types.h
-├── libs/                                    # SDK 预编译库（来自 SDK 包，按平台存放）
+├── libs/                                    # SDK 预编译库（来自 SDK 包）
 │   └── ws63/
 │       └── libconvai_sdk.a
 ├── CMakeLists.txt                          # 顶层构建脚本（来自 Examples 包）
@@ -51,25 +51,32 @@ convai-project/
 │       ├── services/                       # 系统服务
 │       ├── drivers/                        # 硬件驱动
 │       ├── platform/ws63/                  # WS63 平台适配
-│       ├── third_party/                    # 第三方库
+│       ├── platform/convai_platform_ws63.c # AI Hardware Agent HAL 实现
+│       ├── include/                        # GoldieOS 内部头文件
+│       ├── third_party/                    # 第三方库（Opus, FatFs, mbedTLS, TFLite 等）
 │       ├── init/                           # 系统初始化
-│       ├── tools/                          # 工具集
-│       │   ├── build/tools/                #   交叉编译工具链 + ws63_link_v4.exe
-│       │   └── burn/                       #   烧录工具
-└── tools/
+│       ├── compat/                         # 兼容层
+│       └── tools/                          # 工具集
+│           ├── build/                      #   构建工具
+│           │   ├── tools/
+│           │   │   ├── compiler/riscv/     #     交叉编译工具链
+│           │   │   └── ws63_link_v4.exe    #     固件链接器
+│           │   └── config/ws63/            #     链接脚本 & 配置文件
+│           └── burn/                       #   烧录工具
+│               └── hisi/
+│                   └── BurnTool_5.0.39/    #     BurnTool GUI
+└── tools/                                  # 辅助工具（来自 Examples 包）
 ```
 
 ---
 
 ## 前置环境准备
 
-### 构建工具
-
 | 工具 | 版本要求 | 说明 |
 |------|----------|------|
 | CMake | ≥ 3.10 | 构建配置 |
 | MinGW Makefiles | — | Windows 下使用 `mingw32-make` |
-| make | — | 构建执行 |
+| RISC-V 交叉编译工具链 | GCC 7.3.0 | 已包含在 Examples 包中 |
 
 Windows 下推荐使用 [MSYS2](https://www.msys2.org/)。
 
@@ -79,14 +86,14 @@ Windows 下推荐使用 [MSYS2](https://www.msys2.org/)。
 
 ### 下载 SDK 包
 
-从以下地址下载 ConvAI SDK 发布包：
+从以下地址下载 AI Hardware Agent SDK 发布包：
 
 > **下载地址：** `https://download.huaweicloud-koophone.com/ai-hardware-agent-sdk/ai-hardware-agent-sdk.26.6.0.tar`
 
 SDK 包内容：
 
 ```
-convai_sdk-26.6.0.B004.tar
+ai-hardware-agent-sdk-26.6.0.tar
 ├── include/convai/              # 公共 API 头文件
 │   ├── convai_api.h
 │   ├── convai_event.h
@@ -101,28 +108,29 @@ convai_sdk-26.6.0.B004.tar
 
 从以下地址下载示例代码包：
 
-> **下载地址：** `https://<your-server>/releases/examples/convai_examples-26.6.0.B004.tar`
+> **下载地址：** `https://github.com/uoongx/ai-hardware-agent-examples.git`
 
 Examples 包内容：
 
 ```
-convai_examples-26.6.0.B004.tar
+ai-hardware-agent-examples
 ├── CMakeLists.txt               # 顶层构建脚本
 ├── examples/
 │   └── goldieos/                # GoldieOS 综合示例
-│   │   ├── CMakeLists.txt
-│   │   ├── apps/                # 应用层
-│   │   ├── sdk_integration/     # SDK 集成桥接层
-│   │   ├── services/            # 系统服务
-│   │   ├── drivers/             # 硬件驱动
-│   │   ├── platform/ws63/       # WS63 平台适配
-│   │   ├── third_party/         # 第三方库（Opus, FatFs, mbedTLS 等）
-│   │   ├── tools/               # 工具集
-│   │   │   ├── build/tools/     #   交叉编译工具链 + ws63_link_v4.exe
-│   │   │   └── burn/            #   烧录工具
-│   │   ├── libs/ws63/           # WS63 预编译依赖库
-│   │   ├── init/                # 系统初始化
-│   │   └── compat/              # 兼容层
+│       ├── CMakeLists.txt
+│       ├── apps/                # 应用层
+│       ├── sdk_integration/     # SDK 集成桥接层
+│       ├── services/            # 系统服务
+│       ├── drivers/             # 硬件驱动
+│       ├── platform/ws63/       # WS63 平台适配
+│       ├── platform/            # AI Hardware Agent HAL 实现
+│       ├── include/             # GoldieOS 内部头文件
+│       ├── third_party/         # 第三方库（Opus, FatFs, mbedTLS, TFLite 等）
+│       ├── tools/               # 工具集
+│       │   ├── build/           #   构建工具（交叉编译工具链 + ws63_link_v4.exe）
+│       │   └── burn/            #   烧录工具
+│       ├── init/                # 系统初始化
+│       └── compat/              # 兼容层
 └── tools/                       # 辅助工具
 ```
 
@@ -133,19 +141,19 @@ convai_examples-26.6.0.B004.tar
 ### 步骤 1：创建工作目录并解压 Examples 包
 
 ```bash
-mkdir convai-project
-cd convai-project
-tar -xvf /path/to/convai_examples-26.6.0.B004.tar
+mkdir ai-hardware-agent-examples
+cd ai-hardware-agent-examples
+tar -xvf /path/to/ai-hardware-agent-examples.tar
 ```
 
-解压后得到 `CMakeLists.txt`、`examples/`、`tools/` 目录。
+解压后得到 `CMakeLists.txt`、`examples/`、`tools/`。
 
 ### 步骤 2：将 SDK 包解压到工程根目录
 
-SDK 的 `include/` 和 `libs/` 放在工程根目录，供所有平台共用：
+SDK 的 `include/` 和 `libs/` 放在工程根目录：
 
 ```bash
-tar -xvf /path/to/convai_sdk-26.6.0.B004.tar
+tar -xvf /path/to/ai-hardware-agent-sdk-26.6.0.tar
 ```
 
 ### 步骤 3：验证集成结果
@@ -219,7 +227,7 @@ examples/goldieos/tools/build/tools/compiler/riscv/cc_riscv32_musl_105/cc_riscv3
 使用时将上述 `bin/` 目录加入 `PATH`：
 
 ```bash
-export PATH="/path/to/convai-project/examples/goldieos/tools/build/tools/compiler/riscv/cc_riscv32_musl_105/cc_riscv32_musl_fp_win/bin:$PATH"
+export PATH="/path/to/ai-hardware-agent-examples/examples/goldieos/tools/build/tools/compiler/riscv/cc_riscv32_musl_105/cc_riscv32_musl_fp_win/bin:$PATH"
 ```
 
 验证安装：
@@ -240,25 +248,34 @@ examples/goldieos/tools/build/tools/ws63_link_v4.exe
 在 `examples/goldieos/CMakeLists.txt` 中已预配置好路径：
 
 ```cmake
-set(WS63_LINK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../convai_sdk/examples/goldieos")
-set(WS63_LINKER    "${WS63_LINK_ROOT}/tools/build/tools/ws63_link_v4.exe")
+# 优先级: CMake 参数 > 环境变量 > 相对路径回退
+if(WS63_BOARD_ROOT)
+    set(WS63_LINK_ROOT "${WS63_BOARD_ROOT}")
+elseif(DEFINED ENV{GOLDIEOS_ROOT})
+    set(WS63_LINK_ROOT "$ENV{GOLDIEOS_ROOT}")
+else()
+    set(WS63_LINK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
+set(WS63_LINKER "${WS63_LINK_ROOT}/tools/build/tools/ws63_link_v4.exe")
+```
+
+如果你的 `ws63_link_v4.exe` 不在 `examples/goldieos/tools/build/tools/` 下，可通过以下方式覆盖：
+
+```bash
+# CMake 参数
+cmake .. -DWS63_BOARD_ROOT=/path/to/your/goldieos
 ```
 
 #### CMake 配置说明
 
-顶层 `CMakeLists.txt` 中，WS63 平台使用 `IMPORTED STATIC` 方式链接预编译的 `libconvai_sdk.a`：
+顶层 `CMakeLists.txt` 中，WS63 平台的 `convai_sdk` 使用 `IMPORTED STATIC` 方式链接预编译的 `libconvai_sdk.a`：
 
 ```cmake
-if(CONVAI_PLATFORM STREQUAL "ws63")
-    add_library(convai_sdk STATIC IMPORTED)
-    set_target_properties(convai_sdk PROPERTIES
-        IMPORTED_LOCATION
-            ${CMAKE_SOURCE_DIR}/libs/ws63/libconvai_sdk.a
-    )
-    target_include_directories(convai_sdk
-        INTERFACE ${CMAKE_SOURCE_DIR}/include
-    )
-endif()
+add_library(convai_sdk STATIC IMPORTED)
+set_target_properties(convai_sdk PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/libs/ws63/libconvai_sdk.a
+)
 ```
 
 固件链接通过 `ws63_link_v4.exe` 将应用库、Opus 库、SDK 库三者链接：
@@ -269,7 +286,7 @@ libopus.a           ──┤── ws63_link_v4.exe ──→ goldieos.fwpkg
 libconvai_sdk.a     ──┘
 ```
 
-#### 编译
+### 编译
 
 在工程根目录下执行：
 
@@ -281,8 +298,8 @@ cmake .. -G "MinGW Makefiles" \
     -DCMAKE_CXX_COMPILER=riscv32-linux-musl-g++ \
     -DCMAKE_C_COMPILER_WORKS=1 \
     -DCMAKE_CXX_COMPILER_WORKS=1 \
-    -DCMAKE_MAKE_PROGRAM=make
-make
+    -DCMAKE_MAKE_PROGRAM=mingw32-make
+mingw32-make
 ```
 
 | 参数 | 说明 |
@@ -293,7 +310,7 @@ make
 | `-DCMAKE_CXX_COMPILER=riscv32-linux-musl-g++` | RISC-V C++ 交叉编译器 |
 | `-DCMAKE_C_COMPILER_WORKS=1` | 跳过编译器可用性检测（交叉编译必需） |
 | `-DCMAKE_CXX_COMPILER_WORKS=1` | 跳过 C++ 编译器可用性检测 |
-| `-DCMAKE_MAKE_PROGRAM=make` | 指定 make 程序 |
+| `-DCMAKE_MAKE_PROGRAM=mingw32-make` | 指定 make 程序 |
 
 编译产物位于 `build/examples/goldieos/out/`：
 
@@ -325,4 +342,4 @@ examples/goldieos/tools/burn/hisi/BurnTool_5.0.39/BurnTool/BurnTool.exe
 
 ---
 
-> **版本信息：** 本文档基于 ConvAI SDK 26.6.0.B004 版本编写。
+> **版本信息：** 本文档基于 AI Hardware Agent SDK 26.6.0 版本编写。
