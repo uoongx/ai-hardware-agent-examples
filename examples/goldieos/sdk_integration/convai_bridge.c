@@ -420,11 +420,11 @@ static void stop_audio_recording(void)
 }
 
 /* ---- default config fallbacks (used when config file is absent) ---- */
-#define BRIDGE_DEFAULT_BOT_ID         "8b06cbd5-6b56-48ce-ae1a-9b2986117240"
-#define BRIDGE_DEFAULT_PRODUCT_ID     "cdebc6f2-0f27-48f9-8391-ed5753f13aab"
-#define BRIDGE_DEFAULT_PRODUCT_KEY    "ZKdbRTXtS9N0OFQNHWR3"
-#define BRIDGE_DEFAULT_PRODUCT_SECRET "e9qsmeH9wxcK0U1MFjGSkLVM73bmdJDKOQ9nJOtP"
-#define BRIDGE_DEFAULT_DEVICE_NAME    "device1"
+#define BRIDGE_DEFAULT_BOT_ID         "your_agent_id"       // ← 替换为实际的 agent_id
+#define BRIDGE_DEFAULT_PRODUCT_ID     "your_product_id"     // ← 替换为实际的 product_id
+#define BRIDGE_DEFAULT_PRODUCT_KEY    "your_product_key"    // ← 替换为实际的 product_key
+#define BRIDGE_DEFAULT_PRODUCT_SECRET "your_product_secret" // ← 替换为实际的 product_secret
+#define BRIDGE_DEFAULT_DEVICE_NAME    "your_device_name" 
 #define DEFAULT_STARTUP_CONFIG \
     "{" \
             "\"config\":{" \
