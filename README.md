@@ -351,7 +351,7 @@ examples/goldieos/tools/burn/hisi/BurnTool_5.0.39/BurnTool/BurnTool.exe
 5. **执行烧录** — 点击"Send file"，等待完成
 6. **运行固件** — 长按开机按钮启动设备
 
-**硬件连接：** 使用 USB 转串口线连接 WS63 开发板，确认串口驱动已安装。
+**硬件连接：** 使用 USB 转串口线连接 WS63 开发板，确认[串口驱动](https://wch.cn/downloads/CH341SER_EXE.html)已安装。
 
 ---
 
