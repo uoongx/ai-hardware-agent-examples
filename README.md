@@ -345,9 +345,9 @@ examples/goldieos/tools/burn/hisi/BurnTool_5.0.39/BurnTool/BurnTool.exe
 **烧录步骤：**
 
 1. **启动 BurnTool** — 双击 `BurnTool.exe`
-2. **配置参数** — 设置波特率（推荐 `921600`） → 选择 COM 口 → 点击 Connect
+2. **配置参数** — 设置波特率（推荐 `921600`）
 3. **加载固件** — 点击"Select file"，选择 `build/examples/goldieos/out/goldieos.fwpkg`
-4. **进入 ISP 模式** — 关机状态下按住 RESET → 接上 USB → 松开 RESET
+4. **进入 ISP 模式** — 关机状态下按住 RESET → 接上 USB → 松开 RESET → 选择 COM 口 → 点击 Connect
 5. **执行烧录** — 点击"Send file"，等待完成
 6. **运行固件** — 长按开机按钮启动设备
 
