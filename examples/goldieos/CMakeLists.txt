@@ -210,28 +210,6 @@ add_compile_definitions(
     LWIP_CONFIG_FILE="lwipopts_default.h"
 )
 
-# ---- C Compile options (RISC-V specific) ----
-add_compile_options(
-	-w
-	-march=rv32imfc
-	-mabi=ilp32f
-	# --short-enums
-	-std=gnu99
-    -fasm
-    -fcommon
-    -Wall -Wextra
-    -Winit-self -Wpointer-arith -Wstrict-prototypes
-	-fno-strict-aliasing
-	-Os
-	-fno-unwind-tables
-	-ffreestanding
-    -fdata-sections -ffunction-sections
-    -nostdlib -pipe
-	-fno-tree-scev-cprop
-    -mpush-pop -msmall-data-limit=0 -fno-ipa-ra
-    -g
-)
-
 # ---- Link options ----
 add_link_options(
     -static

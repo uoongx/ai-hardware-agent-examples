@@ -21,6 +21,27 @@ endif()
 # ====================================================================
 
 if(CONVAI_PLATFORM STREQUAL "ws63")
+    # ---- C Compile options (RISC-V specific) ----
+    add_compile_options(
+        -w
+        -march=rv32imfc
+        -mabi=ilp32f
+        --short-enums
+        -std=gnu99
+        -fasm
+        -fcommon
+        -Wall -Wextra
+        -Winit-self -Wpointer-arith -Wstrict-prototypes
+        -fno-strict-aliasing
+        -Os
+        -fno-unwind-tables
+        -ffreestanding
+        -fdata-sections -ffunction-sections
+        -nostdlib -pipe
+        -fno-tree-scev-cprop
+        -mpush-pop -msmall-data-limit=0 -fno-ipa-ra
+        -g
+    )
     add_subdirectory(examples/goldieos)
 endif()
 

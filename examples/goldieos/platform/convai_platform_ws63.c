@@ -89,13 +89,11 @@ static void ws63_free(void *ptr) {
 extern void* get_service(int service_index);
 NTPService* ntp_service = NULL;
 uint64_t ws63_get_time_ms(void) {
-    goldie_timeval tv;
-    goldie_gettimeofday(&tv);
-    uint64_t timestamp_s = (tv.tv_sec * 1000 + tv.tv_usec / 1000);
+    uint64_t timestamp_s = 0;
     
     struct tm tm_now;
     if (!ntp_service) {
-        ntp_service = get_service(7);
+        ntp_service = get_service(NTP_SERVICE_INDEX);
     }
 
     if (ntp_service && ntp_service->get_time(&tm_now) == 0) {

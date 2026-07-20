@@ -40,6 +40,7 @@ typedef struct {
     int   bits_per_sample;
     int   running;                     /* flag to stop recording thread */
     void *thread_handle;               /* goldie thread handle */
+    goldie_sem exit_sem; /* semaphore for graceful exit */
 } audio_source_t;
 
 static audio_source_t g_audio_src = {0};
@@ -51,26 +52,30 @@ static long   g_dump_data_bytes = 0;
 #define AUDIO_DUMP_PATH     "audio_dump.wav"
 #endif
 
-/* ---- playback ring buffer (producer-consumer bridge) ---- */
-#define PLAYBACK_RING_SIZE      8000   /* 500ms @ 8kHz mono 16bit */
-#define PLAYBACK_PRIME_THRESHOLD  480   /* 160ms — enough to cover initial network jitter */
-static uint8_t      g_ring_data[PLAYBACK_RING_SIZE];
-static RingBuffer   g_playback_ring;
 
 /* ---- playback thread state ---- */
-
-static uint8_t g_pcm_decode_buf[1024];  /* 用于 on_audio 回调 */
-static char g_json_copy_buf[2048];       /* 用于 on_message_data 回调 */
-
 enum {
     PLAYBACK_IDLE,      /* HW stopped, waiting for next response */
     PLAYBACK_PRIMING,   /* buffering initial data before play_start */
     PLAYBACK_PLAYING,   /* actively consuming and writing to HW */
 };
-static int g_playback_state = PLAYBACK_IDLE;
 
-static int      g_playback_running = 0;   /* thread exit flag */
-static void    *g_playback_thread  = NULL;
+#define PLAYBACK_RING_SIZE 8000 /* 500ms @ 8kHz mono 16bit */
+#define PLAYBACK_PRIME_THRESHOLD 480 /* 160ms — enough to cover initial network jitter */
+
+typedef struct {
+    int state; /* current playback state */
+    int running; /* thread exit flag */
+    void *thread_handle; /* goldie thread handle */
+    goldie_sem exit_sem; /* semaphore for graceful exit */
+    RingBuffer ring; /* playback ring buffer */
+    uint8_t ring_data[PLAYBACK_RING_SIZE];
+} playback_ctrl_t;
+
+static playback_ctrl_t g_playback_ctrl = {0};
+
+static uint8_t g_pcm_decode_buf[1024]; /* 用于 on_audio 回调 */
+static char g_json_copy_buf[2048]; /* 用于 on_message_data 回调 */
 
 #define AUDIO_RECORD_BUF_SIZE  640   /* 40ms @ 8kHz mono 16bit = 640 bytes (double-buffered) */
 #define AUDIO_FRAME_MS          20
@@ -204,17 +209,19 @@ static int audio_record_thread(void *arg)
         }
     }
 
+    printf("[convai_bridge] audio recording thread stopped\n");
     goldie_free(buf);
     goldie_free(planar_buf);
     goldie_free(g711_buf);
-    printf("[convai_bridge] audio recording thread stopped\n");
+    goldie_sem_post(&s->exit_sem);
+
     return 0;
 }
 
 /* ===================================================================
  *  Playback thread — three-state consumer.
  *
- *  State machine (driven by g_playback_state, set by on_status):
+ *  State machine (driven by ctlrl.state, set by on_status):
  *    IDLE    – HW stopped, waiting for next response
  *    PRIMING – buffering initial data before play_start (once per response)
  *    PLAYING – paced consumption: 1 chunk/tick, 10ms interval
@@ -230,6 +237,7 @@ static void playback_write(AudioService *audio, const uint8_t *buf, unsigned int
 static int playback_thread_func(void *arg)
 {
     (void)arg;
+    playback_ctrl_t *ctrl = &g_playback_ctrl;
     AudioService *audio = (AudioService *)g_audio_src.audio_service;
 
     const int sr = g_audio_src.sample_rate > 0 ? g_audio_src.sample_rate : 8000;
@@ -240,9 +248,9 @@ static int playback_thread_func(void *arg)
     int len = 0;
     
     int prev_state = PLAYBACK_IDLE;
-    while (g_playback_running) {
+    while (ctrl->running) {
 
-        switch (g_playback_state) {
+        switch (ctrl->state) {
             /* ---- HW stopped, waiting for next response ---- */
             case PLAYBACK_IDLE: {
                 /*
@@ -251,7 +259,7 @@ static int playback_thread_func(void *arg)
                 */
                 if (prev_state != PLAYBACK_IDLE) {
                     int d;
-                    while ((d = ring_buffer_bulk_read_noblock(&g_playback_ring,
+                    while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
                                                             buf, 1024)) > 0) {
                         playback_write(audio, buf, (unsigned int)d);
                     }
@@ -267,7 +275,7 @@ static int playback_thread_func(void *arg)
 
             /* ---- Buffering initial data before play_start ---- */
             case PLAYBACK_PRIMING:
-                if (g_playback_ring.count < PLAYBACK_PRIME_THRESHOLD) {
+                if (ctrl->ring.count < PLAYBACK_PRIME_THRESHOLD) {
                     goldie_msleep(10);
                     break;
                 }
@@ -277,15 +285,15 @@ static int playback_thread_func(void *arg)
                 if (audio && audio->play_start) {
                     audio->play_start();
                 }
-                g_playback_state = PLAYBACK_PLAYING;
+                ctrl->state = PLAYBACK_PLAYING;
                 printf("[convai_bridge] playback HW started (sr=%d, primed=%u bytes)\n",
-                    sr, (unsigned int)g_playback_ring.count);
+                    sr, (unsigned int)ctrl->ring.count);
                 /* fall through to PLAYING */
 
             /* ---- Paced consumption: 1 chunk/tick, 10ms interval ---- */
             case PLAYBACK_PLAYING: {
                 int d;
-                while ((d = ring_buffer_bulk_read_noblock(&g_playback_ring,
+                while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
                                                         buf, 1024)) > 0) {
                     playback_write(audio, buf, (unsigned int)d);
                 }
@@ -294,16 +302,16 @@ static int playback_thread_func(void *arg)
             }
             default: break;
         }
-        prev_state = g_playback_state;
+        prev_state = ctrl->state;
     }
 
     /* ---- Thread exiting ---- */
-    g_playback_state = PLAYBACK_IDLE;
+    ctrl->state = PLAYBACK_IDLE;
 
     /* Drain remaining, stop HW, finalize dump files */
     {
         int d;
-        while ((d = ring_buffer_bulk_read_noblock(&g_playback_ring,
+        while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
                                                    buf, 1024)) > 0) {
             playback_write(audio, buf, (unsigned int)d);
         }
@@ -312,45 +320,57 @@ static int playback_thread_func(void *arg)
     if (audio && audio->play_stop) {
         audio->play_stop();
     }
-    
-    goldie_free(buf);
+
     printf("[convai_bridge] playback thread stopped\n");
+    goldie_free(buf);
+    goldie_sem_post(&ctrl->exit_sem);
+
     return 0;
 }
 
 static void start_playback_thread(void)
 {
-    if (g_playback_running) return;
+    playback_ctrl_t *ctrl = &g_playback_ctrl;
 
     /* Init the ring buffer (mutex is initialised by ring_buffer_init) */
-    ring_buffer_init(&g_playback_ring);
-    g_playback_ring.buffer     = g_ring_data;
-    g_playback_ring.buffer_len = PLAYBACK_RING_SIZE;
+    ring_buffer_init(&ctrl->ring);
+    ctrl->ring.buffer     = ctrl->ring_data;
+    ctrl->ring.buffer_len = PLAYBACK_RING_SIZE;
 
-    g_playback_running = 1;
-    g_playback_state = PLAYBACK_IDLE;
+    /* Init exit semaphore */
+    goldie_sem_init(&ctrl->exit_sem);
 
-    g_playback_thread = goldie_thread_create(
+    ctrl->running = 1;
+    ctrl->state = PLAYBACK_IDLE;
+
+    goldie_thread_lock();
+    ctrl->thread_handle = goldie_thread_create(
         playback_thread_func, NULL, "convai_playback", 0x2000);
-    if (g_playback_thread) {
-        goldie_thread_set_priority(g_playback_thread, 21);
+    if (ctrl->thread_handle) {
+        goldie_thread_set_priority(ctrl->thread_handle, 21);
     }
+    goldie_thread_unlock();
+
     printf("[convai_bridge] playback thread created\n");
 }
 
 static void stop_playback_thread(void)
 {
-    if (!g_playback_running) return;
+    playback_ctrl_t *ctrl = &g_playback_ctrl;
 
-    g_playback_running = 0;
+    if (!ctrl->running) return;
+    
+    ctrl->running = 0;
 
-    if (g_playback_thread) {
-        goldie_thread_destroy(g_playback_thread);
-        g_playback_thread = NULL;
+    if (ctrl->thread_handle) {
+        goldie_sem_wait(&ctrl->exit_sem);
+        goldie_thread_destroy(ctrl->thread_handle);
+        ctrl->thread_handle = NULL;
+        goldie_sem_destroy(&ctrl->exit_sem);
     }
 
     /* Reset ring buffer (thread is gone, no contention) */
-    ring_buffer_reset(&g_playback_ring);
+    ring_buffer_reset(&ctrl->ring);
 
     printf("[convai_bridge] playback thread destroyed\n");
 }
@@ -378,12 +398,17 @@ static void start_audio_recording(void)
     }
 #endif
 
+    /* Init exit semaphore */
+    goldie_sem_init(&g_audio_src.exit_sem);
+
     g_audio_src.running = 1;
+    goldie_thread_lock();
     g_audio_src.thread_handle = goldie_thread_create(
         audio_record_thread, NULL, "convai_audio", 0x2000);
     if (g_audio_src.thread_handle) {
         goldie_thread_set_priority(g_audio_src.thread_handle, 22);
     }
+    goldie_thread_unlock();
     printf("[convai_bridge] AUTO mode: recording started\n");
 
     /* Start the playback thread (persistent; drains ring buffer on demand) */
@@ -395,8 +420,10 @@ static void stop_audio_recording(void)
     if (!g_audio_src.running) return;
     g_audio_src.running = 0;
     if (g_audio_src.thread_handle) {
+        goldie_sem_wait(&g_audio_src.exit_sem);
         goldie_thread_destroy(g_audio_src.thread_handle);
         g_audio_src.thread_handle = NULL;
+        goldie_sem_destroy(&g_audio_src.exit_sem);
     }
     /* Stop audio capture */
     AudioService *audio = (AudioService *)g_audio_src.audio_service;
@@ -532,11 +559,11 @@ static void on_status(convai_engine_t e, convai_status_e s, void *ud)
      *   other states → stop, but drain remaining frames naturally
      */
     if (s == CONVAI_STATUS_ANSWERING) {
-        g_playback_state = PLAYBACK_PRIMING;
+        g_playback_ctrl.state = PLAYBACK_PRIMING;
     } else {
         if (s == CONVAI_STATUS_INTERRUPTED) {
-            g_playback_state = PLAYBACK_IDLE;
-            ring_buffer_reset(&g_playback_ring);
+            g_playback_ctrl.state = PLAYBACK_IDLE;
+            ring_buffer_reset(&g_playback_ctrl.ring);
         }
     }
 }
@@ -560,9 +587,8 @@ static void on_audio(convai_engine_t e, const void *data, size_t len,
      * If the buffer is full, data is dropped — this is acceptable for
      * real-time TTS; the playback thread will catch up.
      */
-    printf("pcm input-----------------------------write=%d, count=%u bytes\r\n",
-        pcm_len, (unsigned int)g_playback_ring.count);
-    int written = ring_buffer_bulk_write_noblock(&g_playback_ring,
+
+    int written = ring_buffer_bulk_write_noblock(&g_playback_ctrl.ring,
                                                   g_pcm_decode_buf,
                                                   (unsigned int)pcm_len);
     (void)written;

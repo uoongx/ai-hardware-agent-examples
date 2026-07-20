@@ -105,6 +105,7 @@ static err_t send_ntp_request(struct udp_pcb *pcb, const ip_addr_t *server_ip) {
     return err;
 }
 
+static goldie_mutex g_ioctl_mutex;
 /* 同步网络时间（阻塞等待响应） */
 static int ntp_sync_time(void) {
     ip_addr_t server_ip;
@@ -196,7 +197,9 @@ static int ntp_sync_time(void) {
 	
 #ifdef SUPPORT_PCF8563_RTC
 #ifdef DRV_CORE
+    goldie_mutex_lock(&g_ioctl_mutex);
 	goldie_ioctl(mrtc_fd, PCF8563_IOCTL_SET_TIME, &g_base_time);
+    goldie_mutex_unlock(&g_ioctl_mutex);
 #else
     mrtc_driver->set_time(&g_base_time);
 #endif
@@ -218,7 +221,10 @@ static int ntp_get_time(struct tm *tm_out) {
                   if(mrtc_fd<0){
 		 	mrtc_fd = goldie_open(RTC_DRV_NAME, O_RDWR);
 		 }
-		if(!goldie_ioctl(mrtc_fd, PCF8563_IOCTL_GET_TIME, tm_out)){
+        goldie_mutex_lock(&g_ioctl_mutex);
+        int ret = goldie_ioctl(mrtc_fd, PCF8563_IOCTL_GET_TIME, tm_out);
+        goldie_mutex_unlock(&g_ioctl_mutex);
+		if(!ret){
 			return 0;
 		}
 #else
