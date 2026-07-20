@@ -61,7 +61,7 @@ enum {
 };
 
 #define PLAYBACK_RING_SIZE 8000 /* 500ms @ 8kHz mono 16bit */
-#define PLAYBACK_PRIME_THRESHOLD 480 /* 160ms — enough to cover initial network jitter */
+#define PLAYBACK_PRIME_THRESHOLD 2560 /* 160ms — enough to cover initial network jitter */
 
 typedef struct {
     int state; /* current playback state */
@@ -292,10 +292,10 @@ static int playback_thread_func(void *arg)
 
             /* ---- Paced consumption: 1 chunk/tick, 10ms interval ---- */
             case PLAYBACK_PLAYING: {
-                int d;
-                while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
-                                                        buf, 1024)) > 0) {
-                    playback_write(audio, buf, (unsigned int)d);
+                int len = ring_buffer_bulk_read_noblock(&ctrl->ring,
+                                                        buf, 1024);
+                if (len > 0) {
+                    playback_write(audio, buf, (unsigned int)len);
                 }
                 goldie_msleep(10);
                 break;
