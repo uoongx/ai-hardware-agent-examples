@@ -56,19 +56,22 @@ static long   g_dump_data_bytes = 0;
 /* ---- playback thread state ---- */
 enum {
     PLAYBACK_IDLE,      /* HW stopped, waiting for next response */
-    PLAYBACK_PRIMING,   /* buffering initial data before play_start */
-    PLAYBACK_PLAYING,   /* actively consuming and writing to HW */
+    PLAYBACK_PLAYING,   /* DMA feedback-driven consumption */
 };
 
-#define PLAYBACK_RING_SIZE 8000 /* 500ms @ 8kHz mono 16bit */
-#define PLAYBACK_PRIME_THRESHOLD 2560 /* 160ms — enough to cover initial network jitter */
+#define PLAYBACK_RING_SIZE  8000    /* 500ms @ 8kHz mono 16bit */
+#define PLAYBACK_READ_CHUNK  1024    /* max bytes per ring-buffer read */
+#define DMA_TARGET           0x1000  /* 4096 bytes = 256ms target DMA fill level */
+#define DMA_LOW              0x800   /* 2048 bytes = 128ms, feed aggressively below this */
+#define DMA_DRAINED          320     /* 20ms, considered drained for stop decision */
 
 typedef struct {
-    int state; /* current playback state */
-    int running; /* thread exit flag */
+    int state;          /* current playback state */
+    int running;        /* thread exit flag */
+    int drain_to_stop;  /* set by on_status on ANSWER_FINISHED: drain then stop */
     void *thread_handle; /* goldie thread handle */
     goldie_sem exit_sem; /* semaphore for graceful exit */
-    RingBuffer ring; /* playback ring buffer */
+    RingBuffer ring;    /* playback ring buffer */
     uint8_t ring_data[PLAYBACK_RING_SIZE];
 } playback_ctrl_t;
 
@@ -219,20 +222,21 @@ static int audio_record_thread(void *arg)
 }
 
 /* ===================================================================
- *  Playback thread — three-state consumer.
+ *  Playback thread — DMA feedback-driven consumer.
  *
- *  State machine (driven by ctlrl.state, set by on_status):
- *    IDLE    – HW stopped, waiting for next response
- *    PRIMING – buffering initial data before play_start (once per response)
- *    PLAYING – paced consumption: 1 chunk/tick, 10ms interval
+ *  Feeding: queries get_valid_length() to monitor audio hardware DMA
+ *  water level.  When DMA is below DMA_TARGET (256 ms), data is pulled
+ *  from the ring buffer and fed to the hardware.  When DMA is full,
+ *  data stays in the ring buffer, absorbing network jitter.
+ *
+ *  Stopping: explicit signals from on_status.
+ *    ANSWER_FINISHED → drain_to_stop flag → thread drains ring buffer
+ *                      to DMA, waits for DMA to empty, then stops HW.
+ *    INTERRUPTED     → immediate stop + ring buffer reset.
+ *
+ *  This eliminates the old fixed-10 ms-tick underrun by letting the
+ *  hardware's actual consumption rate drive the feeding loop.
  * =================================================================== */
-
-static void playback_write(AudioService *audio, const uint8_t *buf, unsigned int len)
-{
-    if (audio && audio->audio_write) {
-        audio->audio_write(buf, len);
-    }
-}
 
 static int playback_thread_func(void *arg)
 {
@@ -242,65 +246,118 @@ static int playback_thread_func(void *arg)
 
     const int sr = g_audio_src.sample_rate > 0 ? g_audio_src.sample_rate : 8000;
 
-    printf("[convai_bridge] playback thread started (sr=%d)\n", sr);
+    printf("[convai_bridge] playback thread started (sr=%d, DMA feedback)\n", sr);
 
-    uint8_t *buf = (uint8_t *)goldie_malloc(1024);
-    int len = 0;
-    
+    uint8_t *buf = (uint8_t *)goldie_malloc(PLAYBACK_READ_CHUNK);
+    if (!buf) {
+        printf("[convai_bridge] ERROR: playback buffer alloc failed\n");
+        goldie_sem_post(&ctrl->exit_sem);
+        return -1;
+    }
+
     int prev_state = PLAYBACK_IDLE;
+    int hw_started = 0;
+
     while (ctrl->running) {
 
         switch (ctrl->state) {
-            /* ---- HW stopped, waiting for next response ---- */
-            case PLAYBACK_IDLE: {
-                /*
-                * Only drain + stop on the transition INTO idle,
-                * not every 50ms tick.
-                */
-                if (prev_state != PLAYBACK_IDLE) {
-                    int d;
-                    while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
-                                                            buf, 1024)) > 0) {
-                        playback_write(audio, buf, (unsigned int)d);
-                    }
-                    /* play_stop is idempotent — safe to call even if already stopped */
-                    if (audio && audio->play_stop) {
-                        audio->play_stop();
-                    }
-                    printf("[convai_bridge] playback HW stopped\n");
+        /* ---- HW stopped, waiting for next response ---- */
+        case PLAYBACK_IDLE:
+            if (prev_state != PLAYBACK_IDLE) {
+                if (hw_started && audio && audio->play_stop) {
+                    audio->play_stop();
+                    hw_started = 0;
                 }
-                goldie_msleep(10);
-                break;
+                printf("[convai_bridge] playback HW stopped\n");
             }
+            goldie_msleep(20);
+            break;
 
-            /* ---- Buffering initial data before play_start ---- */
-            case PLAYBACK_PRIMING:
-                if (ctrl->ring.count < PLAYBACK_PRIME_THRESHOLD) {
-                    goldie_msleep(10);
-                    break;
-                }
-                if (audio && audio->audio_output_config) {
-                    audio->audio_output_config(sr);
-                }
-                if (audio && audio->play_start) {
-                    audio->play_start();
-                }
-                ctrl->state = PLAYBACK_PLAYING;
-                printf("[convai_bridge] playback HW started (sr=%d, primed=%u bytes)\n",
-                    sr, (unsigned int)ctrl->ring.count);
-                /* fall through to PLAYING */
+        /* ---- DMA feedback-driven consumption ---- */
+        case PLAYBACK_PLAYING: {
+            /*
+             * 1. Query hardware DMA water level.
+             *    get_valid_length returns bytes still queued in the
+             *    audio DMA buffer (0 = empty, large = full).
+             */
+            unsigned int dma_level = (audio && audio->get_valid_length)
+                ? audio->get_valid_length(NULL) : 0;
 
-            /* ---- Paced consumption: 1 chunk/tick, 10ms interval ---- */
-            case PLAYBACK_PLAYING: {
+            /*
+             * 2. If DMA is below target, pull from ring buffer and
+             *    feed to hardware.  When DMA is above target, skip
+             *    — let data accumulate in the ring buffer instead.
+             */
+            if (dma_level < DMA_TARGET) {
                 int len = ring_buffer_bulk_read_noblock(&ctrl->ring,
-                                                        buf, 1024);
+                                                        buf, PLAYBACK_READ_CHUNK);
                 if (len > 0) {
-                    playback_write(audio, buf, (unsigned int)len);
+                    /*
+                     * Start hardware on first data (audio_output_config
+                     * + play_start).  The DMA buffer is empty at this
+                     * point, so the first few iterations will feed
+                     * aggressively to fill it up to DMA_TARGET.
+                     */
+                    if (!hw_started) {
+                        if (audio && audio->audio_output_config) {
+                            audio->audio_output_config(sr);
+                        }
+                        if (audio && audio->play_start) {
+                            audio->play_start();
+                            hw_started = 1;
+                        }
+                        printf("[convai_bridge] playback HW started (sr=%d)\n", sr);
+                    }
+
+                    if (audio && audio->audio_write) {
+                        audio->audio_write(buf, (unsigned int)len);
+                    }
+                    /*
+                     * Update DMA level after write so the sleep
+                     * decision below uses a fresh value.
+                     */
+                    dma_level = (audio && audio->get_valid_length)
+                        ? audio->get_valid_length(NULL) : dma_level;
                 }
-                goldie_msleep(10);
-                break;
             }
-            default: break;
+
+            /*
+             * 3. Check drain_to_stop: on_status sets this flag when
+             *    ANSWER_FINISHED is received.  The thread drains the
+             *    ring buffer to DMA, then waits for the DMA hardware
+             *    to finish playing before stopping.
+             */
+            if (ctrl->drain_to_stop) {
+                if (ctrl->ring.count == 0 && dma_level < DMA_DRAINED) {
+                    if (hw_started && audio && audio->play_stop) {
+                        audio->play_stop();
+                        hw_started = 0;
+                    }
+                    ctrl->drain_to_stop = 0;
+                    ctrl->state = PLAYBACK_IDLE;
+                    printf("[convai_bridge] playback drained and stopped (dma=%u)\n",
+                           dma_level);
+                }
+            }
+
+            /*
+             * 4. Dynamic sleep: sleep duration scales with DMA fill.
+             *    High DMA → sleep longer (hardware has plenty).
+             *    Low DMA  → sleep shorter (need to feed soon).
+             *    This naturally follows the hardware consumption rate.
+             */
+            if (!hw_started)
+                goldie_msleep(5);    /* waiting for first data */
+            else if (dma_level > DMA_LOW)
+                goldie_msleep(15);   /* plenty buffered, relax */
+            else if (dma_level > DMA_DRAINED)
+                goldie_msleep(5);    /* getting low, feed soon */
+            else
+                goldie_msleep(2);    /* nearly empty, urgent */
+            break;
+        }
+        default:
+            break;
         }
         prev_state = ctrl->state;
     }
@@ -308,17 +365,19 @@ static int playback_thread_func(void *arg)
     /* ---- Thread exiting ---- */
     ctrl->state = PLAYBACK_IDLE;
 
-    /* Drain remaining, stop HW, finalize dump files */
+    /* Drain remaining ring-buffer data */
     {
         int d;
         while ((d = ring_buffer_bulk_read_noblock(&ctrl->ring,
-                                                   buf, 1024)) > 0) {
-            playback_write(audio, buf, (unsigned int)d);
+                                                   buf, PLAYBACK_READ_CHUNK)) > 0) {
+            if (audio && audio->audio_write)
+                audio->audio_write(buf, (unsigned int)d);
         }
     }
 
-    if (audio && audio->play_stop) {
+    if (hw_started && audio && audio->play_stop) {
         audio->play_stop();
+        hw_started = 0;
     }
 
     printf("[convai_bridge] playback thread stopped\n");
@@ -553,18 +612,22 @@ static void on_status(convai_engine_t e, convai_status_e s, void *ud)
     printf("[STATUS] %s\n", str);
 
     /*
-     * State-driven playback:
-     *   ANSWERING    → prime then paced consumption
-     *   INTERRUPTED  → stop + drop stale audio
-     *   other states → stop, but drain remaining frames naturally
+     * State-driven playback (DMA feedback mode):
+     *   ANSWERING       → start playback (DMA feedback loop drives feeding)
+     *   ANSWER_FINISHED  → signal drain-to-stop (thread drains ring buffer
+     *                       to DMA, waits for DMA to empty, then stops HW)
+     *   INTERRUPTED     → stop HW immediately, drop all buffered data
      */
     if (s == CONVAI_STATUS_ANSWERING) {
-        g_playback_ctrl.state = PLAYBACK_PRIMING;
-    } else {
-        if (s == CONVAI_STATUS_INTERRUPTED) {
-            g_playback_ctrl.state = PLAYBACK_IDLE;
-            ring_buffer_reset(&g_playback_ctrl.ring);
-        }
+        g_playback_ctrl.drain_to_stop = 0;
+        g_playback_ctrl.state = PLAYBACK_PLAYING;
+    } else if (s == CONVAI_STATUS_ANSWER_FINISHED) {
+        g_playback_ctrl.drain_to_stop = 1;
+        /* state stays PLAYING — thread will drain then stop */
+    } else if (s == CONVAI_STATUS_INTERRUPTED) {
+        g_playback_ctrl.drain_to_stop = 0;
+        g_playback_ctrl.state = PLAYBACK_IDLE;
+        ring_buffer_reset(&g_playback_ctrl.ring);
     }
 }
 
