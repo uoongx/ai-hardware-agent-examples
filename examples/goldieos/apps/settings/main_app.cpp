@@ -336,8 +336,10 @@ static void cloud_event_callback(convai_event_code_e event_type, const char *inf
             ButtonView_enter_talk->setVisible(true);
             break;
         case CONVAI_EV_DISCONNECTED:
+        case CONVAI_EV_FAILED:
             color = 0x0000; text = "● 未连接";
             ButtonView_enter_talk->setVisible(false);
+            talk_current_emotion = EMOTION_NEUTRAL;
             break;
         default: return;
     }
