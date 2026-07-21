@@ -121,7 +121,7 @@ file(GLOB WS63_SDK_INTEGRATION_SRC
 file(GLOB WS63_APP_SRC
     apps/launcher/*.cpp
     apps/settings/*.cpp
-    # apps/alarm/*.cpp
+    apps/alarm/*.cpp
     apps/animaton_player/*.cpp
     # apps/recorder/*.cpp
     # apps/AItalk/*.cpp

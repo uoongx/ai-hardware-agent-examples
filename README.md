@@ -13,6 +13,7 @@
 5. [设备凭证配置](#设备凭证配置)
 6. [平台编译指南](#平台编译指南)
    - [WS63 平台](#ws63-平台)
+7. [开发文档](#开发文档)
 
 ---
 
@@ -352,6 +353,14 @@ examples/goldieos/tools/burn/hisi/BurnTool_5.0.39/BurnTool/BurnTool.exe
 6. **运行固件** — 长按开机按钮启动设备
 
 **硬件连接：** 使用 USB 转串口线连接 WS63 开发板，确认[串口驱动](https://wch.cn/downloads/CH341SER_EXE.html)已安装。
+
+---
+
+## 开发文档
+
+| 文档 | 说明 |
+|------|------|
+| [Function Call 开发最佳实践](examples/goldieos/docs/function_call.md) | 如何新增 function call handler、参数解析规范、JSON 协议 |
 
 ---
 

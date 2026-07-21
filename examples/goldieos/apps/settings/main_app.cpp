@@ -8,6 +8,7 @@ extern "C" {
 #include "convai_bridge.h"
 #include "convai/convai_api.h"
 #include "cJSON.h"
+#include "alarm_service.h"
 #ifdef SUPPORT_SLE
 #include "sle_sdp_service.h"
 #include "platform/ws63/sle_drv.h"
@@ -345,7 +346,217 @@ static void cloud_event_callback(convai_event_code_e event_type, const char *inf
     if (info) printf("[AI Settings] EVENT: %s (%s)\n", text, info);
 }
 
-/* 通用消息回调：app 层处理所有 server 消息（function call 自动回复 + 业务字段提取） */
+/* ================================================================
+ * Function Call Handler Registry
+ *
+ * 新增 function call 只需:
+ *   1. 编写一个 handler 函数（签名见 FuncCallHandler）
+ *   2. 在 func_call_registry[] 中添加一行 { "name", handler }
+ * ================================================================ */
+
+/* handler 返回值: true=已处理, false=未识别 */
+/* output_str 默认指向成功消息, handler 可通过 output_buf 自定义回复 */
+typedef bool (*FuncCallHandler)(const char *call_id, cJSON *args_json,
+                                 char *output_buf, size_t buf_size,
+                                 const char **output_str);
+
+/* ---- 各 function call handler 实现 ---- */
+
+static bool handle_emotion(const char *call_id, cJSON *args_json,
+                            char *output_buf, size_t buf_size,
+                            const char **output_str)
+{
+    (void)call_id; (void)output_buf; (void)buf_size; (void)output_str;
+
+    cJSON *emotion_item = cJSON_GetObjectItem(args_json, "emotion");
+    if (!emotion_item || !cJSON_IsString(emotion_item)) return true; /* 静默忽略缺参数 */
+
+    const char *emotion = emotion_item->valuestring;
+    printf("[AI Settings] EMOTION: %s\n", emotion);
+
+    if (strcmp(emotion, "neutral") == 0)
+        talk_current_emotion = EMOTION_NEUTRAL;
+    else if (strcmp(emotion, "happy") == 0)
+        talk_current_emotion = EMOTION_HAPPY;
+    else if (strcmp(emotion, "angry") == 0)
+        talk_current_emotion = EMOTION_ANGRY;
+    else if (strcmp(emotion, "sad") == 0)
+        talk_current_emotion = EMOTION_SAD;
+    else if (strcmp(emotion, "doubt") == 0)
+        talk_current_emotion = EMOTION_DOUBT;
+    else
+        talk_current_emotion = EMOTION_NEUTRAL;
+
+    return true;
+}
+
+static bool handle_set_alarm(const char *call_id, cJSON *args_json,
+                              char *output_buf, size_t buf_size,
+                              const char **output_str)
+{
+    (void)call_id;
+
+    int hour   = 0;
+    int minute = 0;
+    bool time_parsed = false;
+
+    /* ---- 格式 A: "time": "HH:MM" (AI 下发的标准格式) ---- */
+    cJSON *time_item = cJSON_GetObjectItem(args_json, "time");
+    if (time_item && cJSON_IsString(time_item)) {
+        const char *time_str = time_item->valuestring;
+        if (strlen(time_str) == 5 && time_str[2] == ':') {
+            hour   = (time_str[0] - '0') * 10 + (time_str[1] - '0');
+            minute = (time_str[3] - '0') * 10 + (time_str[4] - '0');
+            time_parsed = true;
+        }
+    }
+
+    /* ---- 格式 B: "hour" / "minute" 数字 (兼容旧格式) ---- */
+    if (!time_parsed) {
+        cJSON *hour_item   = cJSON_GetObjectItem(args_json, "hour");
+        cJSON *minute_item = cJSON_GetObjectItem(args_json, "minute");
+        if (hour_item && cJSON_IsNumber(hour_item) &&
+            minute_item && cJSON_IsNumber(minute_item)) {
+            hour   = hour_item->valueint;
+            minute = minute_item->valueint;
+            time_parsed = true;
+        }
+    }
+
+    if (!time_parsed) {
+        *output_str = "{\"result\":\"error\",\"message\":\"缺少time参数,格式:\\\"HH:MM\\\"\"}";
+        printf("[AI Settings] SET_ALARM ERROR: missing time\n");
+        return true;
+    }
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        *output_str = "{\"result\":\"error\",\"message\":\"时间范围无效\"}";
+        printf("[AI Settings] SET_ALARM ERROR: invalid time %d:%d\n", hour, minute);
+        return true;
+    }
+
+    AlarmService *alarm_svc = (AlarmService*)get_service(ALARM_SERVICE_INDEX);
+    if (!alarm_svc) {
+        *output_str = "{\"result\":\"error\",\"message\":\"闹钟服务不可用\"}";
+        printf("[AI Settings] SET_ALARM ERROR: service not available\n");
+        return true;
+    }
+
+    AlarmInfo alarm;
+    memset(&alarm, 0, sizeof(AlarmInfo));
+    alarm.m_hour     = (char)hour;
+    alarm.m_min      = (char)minute;
+    alarm.enabled    = true;
+    alarm.ring_index = 0;
+
+    /* label: 闹钟名称 (AlarmInfo 无此字段, 仅日志记录) */
+    cJSON *label_item = cJSON_GetObjectItem(args_json, "label");
+    const char *label = (label_item && cJSON_IsString(label_item))
+                        ? label_item->valuestring : NULL;
+
+    /* ---- 解析 repeat / weekdays ---- */
+    /* 优先级: weekdays数组 > repeat字符串 > 默认全选 */
+    cJSON *weekdays_item = cJSON_GetObjectItem(args_json, "weekdays");
+    cJSON *repeat_item   = cJSON_GetObjectItem(args_json, "repeat");
+
+    if (weekdays_item && cJSON_IsArray(weekdays_item)) {
+        /* 格式 B: weekdays 数组 */
+        int sz = cJSON_GetArraySize(weekdays_item);
+        for (int w = 0; w < 7 && w < sz; w++) {
+            cJSON *d = cJSON_GetArrayItem(weekdays_item, w);
+            alarm.weekdays[w] = (d && cJSON_IsTrue(d));
+        }
+    } else if (repeat_item && cJSON_IsString(repeat_item)) {
+        /* 格式 A: repeat 字符串映射 */
+        const char *repeat = repeat_item->valuestring;
+        if (strcmp(repeat, "none") == 0) {
+            /* 一次性闹钟: 全部不选 (当前系统行为=每天响, 需用户手动删除) */
+            /* (不设置任何 weekday, 保持 memset 的 false) */
+        } else if (strcmp(repeat, "daily") == 0) {
+            for (int w = 0; w < 7; w++) alarm.weekdays[w] = true;
+        } else if (strcmp(repeat, "weekdays") == 0) {
+            /* 周一~周五 (index 0~4) */
+            for (int w = 0; w < 5; w++) alarm.weekdays[w] = true;
+        } else {
+            /* 未知 repeat 值, 默认每天 */
+            for (int w = 0; w < 7; w++) alarm.weekdays[w] = true;
+        }
+    } else {
+        /* 都没传, 默认全选 */
+        for (int w = 0; w < 7; w++) alarm.weekdays[w] = true;
+    }
+
+    /* enabled（可选，默认 true） */
+    cJSON *enabled_item = cJSON_GetObjectItem(args_json, "enabled");
+    if (enabled_item && cJSON_IsBool(enabled_item))
+        alarm.enabled = cJSON_IsTrue(enabled_item) ? true : false;
+
+    printf("[AI Settings] SET_ALARM: %02d:%02d, label=%s, enabled=%d\n",
+           alarm.m_hour, alarm.m_min, label ? label : "(none)", alarm.enabled);
+
+    int ret = alarm_svc->add_alarm(&alarm);
+    if (ret >= 0) {
+        snprintf(output_buf, buf_size,
+                 "{\"result\":\"success\",\"message\":\"闹钟已设置\",\"index\":%d}", ret);
+        *output_str = output_buf;
+        printf("[AI Settings] SET_ALARM OK: index=%d\n", ret);
+    } else if (ret == -2) {
+        *output_str = "{\"result\":\"error\",\"message\":\"闹钟已满,最多10个\"}";
+        printf("[AI Settings] SET_ALARM ERROR: max alarms reached\n");
+    } else {
+        snprintf(output_buf, buf_size,
+                 "{\"result\":\"error\",\"message\":\"添加失败,错误码:%d\"}", ret);
+        *output_str = output_buf;
+        printf("[AI Settings] SET_ALARM ERROR: ret=%d\n", ret);
+    }
+
+    return true;
+}
+
+/* ---- get_weather: 查询天气 ---- */
+/* 设备端无 HTTP 能力, 仅解析 location 并确认; 实际天气数据由 AI 在对话中提供 */
+static bool handle_get_weather(const char *call_id, cJSON *args_json,
+                                char *output_buf, size_t buf_size,
+                                const char **output_str)
+{
+    (void)call_id;
+
+    cJSON *loc_item = cJSON_GetObjectItem(args_json, "location");
+    const char *location = (loc_item && cJSON_IsString(loc_item))
+                           ? loc_item->valuestring : NULL;
+
+    if (!location) {
+        *output_str = "{\"result\":\"error\",\"message\":\"缺少location参数\"}";
+        printf("[AI Settings] GET_WEATHER ERROR: missing location\n");
+        return true;
+    }
+
+    printf("[AI Settings] GET_WEATHER: location=%s\n", location);
+
+    /* TODO: 若后续设备支持 HTTP, 可在此调用天气 API */
+    snprintf(output_buf, buf_size,
+             "{\"result\":\"success\",\"message\":\"晴天\","
+             "\"location\":\"%s\"}", location);
+    *output_str = output_buf;
+
+    return true;
+}
+
+/* ---- Handler Registry ---- */
+/* 新增 function call 在这里添加一行即可 */
+static const struct {
+    const char      *name;
+    FuncCallHandler  handler;
+} func_call_registry[] = {
+    { "emotion",     handle_emotion },
+    { "set_alarm",   handle_set_alarm },
+    { "get_weather", handle_get_weather },
+};
+
+static const int kFuncCallRegistrySize =
+    sizeof(func_call_registry) / sizeof(func_call_registry[0]);
+
+/* ---- 通用消息回调 ---- */
 static void cloud_message_callback(const char *json_str)
 {
     if (!json_str) return;
@@ -361,89 +572,82 @@ static void cloud_message_callback(const char *json_str)
 
     const char *type_str = type_item->valuestring;
 
-    /* ---- Handle Function Call arguments done ---- */
-    if (strcmp(type_str, "response.function_call_arguments.done") == 0) {
-        cJSON *calls = cJSON_GetObjectItem(root, "calls");
-        if (!calls || !cJSON_IsArray(calls)) {
-            printf("[AI Settings] WARNING: missing 'calls' array\n");
-            cJSON_Delete(root);
-            return;
-        }
+    if (strcmp(type_str, "response.function_call_arguments.done") != 0) {
+        cJSON_Delete(root);
+        return;
+    }
 
-        int call_count = cJSON_GetArraySize(calls);
+    cJSON *calls = cJSON_GetObjectItem(root, "calls");
+    if (!calls || !cJSON_IsArray(calls)) {
+        printf("[AI Settings] WARNING: missing 'calls' array\n");
+        cJSON_Delete(root);
+        return;
+    }
+
+    int call_count = cJSON_GetArraySize(calls);
+    printf("\n");
+    printf("========================================\n");
+    printf("FunctionCall Received (%d calls)\n", call_count);
+    printf("========================================\n");
+
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "type", "conversation.items.create");
+    cJSON *items = cJSON_AddArrayToObject(response, "items");
+
+    for (int i = 0; i < call_count; i++) {
+        cJSON *call = cJSON_GetArrayItem(calls, i);
+        if (!call) continue;
+
+        const char *call_id   = cJSON_GetStringValue(cJSON_GetObjectItem(call, "call_id"));
+        const char *name      = cJSON_GetStringValue(cJSON_GetObjectItem(call, "name"));
+        const char *arguments = cJSON_GetStringValue(cJSON_GetObjectItem(call, "arguments"));
+
         printf("\n");
-        printf("========================================\n");
-        printf("FunctionCall Received (%d calls)\n", call_count);
-        printf("========================================\n");
+        printf("call_id=%s\n",  call_id   ? call_id   : "(null)");
+        printf("name=%s\n",     name      ? name      : "(null)");
+        printf("arguments=%s\n", arguments ? arguments : "(null)");
 
-        /* Build response: { "type":"conversation.items.create", "items":[...] } */
-        cJSON *response = cJSON_CreateObject();
-        cJSON_AddStringToObject(response, "type", "conversation.items.create");
-        cJSON *items = cJSON_AddArrayToObject(response, "items");
+        /* ---- 输出缓冲区与默认回复 ---- */
+        char output_buf[256];
+        const char *output_str = "{\"result\":\"success\",\"message\":\"成功\"}";
 
-        for (int i = 0; i < call_count; i++) {
-            cJSON *call = cJSON_GetArrayItem(calls, i);
-            if (!call) continue;
+        /* ---- 解析 arguments 并分派到对应 handler ---- */
+        cJSON *args_json = arguments ? cJSON_Parse(arguments) : NULL;
 
-            const char *call_id  = cJSON_GetStringValue(
-                cJSON_GetObjectItem(call, "call_id"));
-            const char *name     = cJSON_GetStringValue(
-                cJSON_GetObjectItem(call, "name"));
-            const char *arguments = cJSON_GetStringValue(
-                cJSON_GetObjectItem(call, "arguments"));
-
-            printf("\n");
-            printf("call_id=%s\n",  call_id  ? call_id  : "(null)");
-            printf("name=%s\n",     name     ? name     : "(null)");
-            printf("arguments=%s\n", arguments ? arguments : "(null)");
-
-            /* ---- 业务处理：emotion ---- */
-            if (name && strcmp(name, "emotion") == 0 && arguments) {
-                cJSON *args_json = cJSON_Parse(arguments);
-                if (args_json) {
-                    cJSON *emotion_item = cJSON_GetObjectItem(args_json, "emotion");
-                    if (emotion_item && cJSON_IsString(emotion_item)) {
-                        const char *emotion = emotion_item->valuestring;
-                        printf("[AI Settings] EMOTION: %s\n", emotion);
-
-                        if (strcmp(emotion, "neutral") == 0)
-                            talk_current_emotion = EMOTION_NEUTRAL;
-                        else if (strcmp(emotion, "happy") == 0)
-                            talk_current_emotion = EMOTION_HAPPY;
-                        else if (strcmp(emotion, "angry") == 0)
-                            talk_current_emotion = EMOTION_ANGRY;
-                        else if (strcmp(emotion, "sad") == 0)
-                            talk_current_emotion = EMOTION_SAD;
-                        else if (strcmp(emotion, "doubt") == 0)
-                            talk_current_emotion = EMOTION_DOUBT;
-                        else
-                            talk_current_emotion = EMOTION_NEUTRAL;
-                    }
-                    cJSON_Delete(args_json);
+        if (name && args_json) {
+            bool handled = false;
+            for (int h = 0; h < kFuncCallRegistrySize; h++) {
+                if (strcmp(name, func_call_registry[h].name) == 0) {
+                    handled = func_call_registry[h].handler(
+                        call_id, args_json, output_buf, sizeof(output_buf), &output_str);
+                    break;
                 }
             }
-
-            /* ---- 自动回复 function_call_output（所有 function call 都需要） ---- */
-            cJSON *item = cJSON_CreateObject();
-            cJSON_AddStringToObject(item, "type", "function_call_output");
-            cJSON_AddStringToObject(item, "call_id", call_id ? call_id : "");
-            cJSON_AddStringToObject(item, "output",
-                "{\"result\":\"success\",\"message\":\"成功\"}");
-            cJSON_AddItemToArray(items, item);
+            if (!handled) {
+                printf("[AI Settings] Unhandled function: %s\n", name ? name : "(null)");
+            }
         }
 
-        printf("\n");
-        printf("========================================\n");
+        if (args_json) cJSON_Delete(args_json);
 
-        /* 发送回复 */
-        char *response_str = cJSON_PrintUnformatted(response);
-        if (response_str && sdk_engine) {
-            printf("[AI Settings] Sending function call result: %s\n", response_str);
-            convai_send_message(sdk_engine, response_str, strlen(response_str), NULL);
-            cJSON_free(response_str);
-        }
-        cJSON_Delete(response);
+        /* ---- 自动回复 ---- */
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "type", "function_call_output");
+        cJSON_AddStringToObject(item, "call_id", call_id ? call_id : "");
+        cJSON_AddStringToObject(item, "output", output_str);
+        cJSON_AddItemToArray(items, item);
     }
+
+    printf("\n");
+    printf("========================================\n");
+
+    char *response_str = cJSON_PrintUnformatted(response);
+    if (response_str && sdk_engine) {
+        printf("[AI Settings] Sending function call result: %s\n", response_str);
+        convai_send_message(sdk_engine, response_str, strlen(response_str), NULL);
+        cJSON_free(response_str);
+    }
+    cJSON_Delete(response);
 
     cJSON_Delete(root);
 }
