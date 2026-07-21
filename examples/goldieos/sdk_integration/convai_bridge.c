@@ -571,7 +571,7 @@ static const char *bridge_build_config_json(char *buf, size_t buf_size)
 /* ===================================================================
  *  SDK callbacks
  * =================================================================== */
-
+static void bridge_cleanup(void);
 static void on_event(convai_engine_t e, convai_event_t *ev, void *ud)
 {
     (void)e; (void)ud;
@@ -584,10 +584,12 @@ static void on_event(convai_engine_t e, convai_event_t *ev, void *ud)
     case CONVAI_EV_DISCONNECTED:
         info = ev->data.details ? ev->data.details : "";
         printf("[convai_bridge] EVENT: DISCONNECTED (reason=%s)\n", info);
+        bridge_cleanup();
         break;
     case CONVAI_EV_FAILED:
-        /* ev->data.details contains complete JSON: {"code": "...", "message": "..."} */
+        info = ev->data.details ? ev->data.details : "";
         printf("[convai_bridge] EVENT: FAILED %s\n", ev->data.details);
+        bridge_cleanup();
         break;
     default: break;
     }
@@ -788,19 +790,28 @@ int convai_bridge_start(void)
     return ret;
 }
 
+/* Clean up bridge-layer resources: audio threads, hardware, state.
+ * Does NOT call convai_stop() — SDK handles itself on disconnect/failure. */
+static void bridge_cleanup(void)
+{
+    stop_audio_recording();
+
+    g_started = 0;
+    g_status  = CONVAI_STATUS_IDLE;
+    if (g_status_cb) g_status_cb(g_status);
+
+    printf("[convai_bridge] bridge cleanup done\n");
+}
+
 int convai_bridge_stop(void)
 {
     if (!g_engine) return -1;
     if (!g_started) return 0;
 
-    /* Stop recording before stopping engine */
-    stop_audio_recording();
+    bridge_cleanup();
 
     printf("[convai_bridge] STOP\n");
     int ret = convai_stop(g_engine);
-    g_started = 0;
-    g_status  = CONVAI_STATUS_IDLE;
-    if (g_status_cb) g_status_cb(g_status);
     if (ret != CONVAI_OK) {
         printf("[convai_bridge] stop FAILED: %s\n", convai_err_2_str(ret));
     }
