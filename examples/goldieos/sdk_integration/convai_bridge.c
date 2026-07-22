@@ -755,15 +755,12 @@ const char *convai_bridge_get_startup_config(void)
     return g_startup_config[0] ? g_startup_config : NULL;
 }
 
+static void bridge_setup(void);
 int convai_bridge_start(void)
 {
     if (!g_engine) {
         printf("[convai_bridge] ERROR: not initialized\n");
         return -1;
-    }
-    if (g_started) {
-        printf("[convai_bridge] already started\n");
-        return 0;
     }
 
     convai_opt_t opt;
@@ -777,23 +774,34 @@ int convai_bridge_start(void)
 
     int ret = convai_start(g_engine, &opt);
     if (ret == CONVAI_OK) {
-        g_started = 1;
-        g_status  = CONVAI_STATUS_LISTENING;
-        printf("[convai_bridge] start OK (status=LISTENING)\n");
-        if (g_status_cb) g_status_cb(g_status);
-
-        /* Begin background microphone recording */
-        start_audio_recording();
+        bridge_setup();
     } else {
         printf("[convai_bridge] start FAILED: %s\n", convai_err_2_str(ret));
     }
     return ret;
 }
 
+/* Bridge-layer startup: audio recording + playback threads, state.
+ * Does NOT call convai_start() — caller handles SDK initialization. */
+static void bridge_setup(void)
+{
+    if (g_started) return;
+
+    start_audio_recording();
+
+    g_started = 1;
+    g_status  = CONVAI_STATUS_LISTENING;
+    if (g_status_cb) g_status_cb(g_status);
+
+    printf("[convai_bridge] bridge setup done (LISTENING)\n");
+}
+
 /* Clean up bridge-layer resources: audio threads, hardware, state.
  * Does NOT call convai_stop() — SDK handles itself on disconnect/failure. */
 static void bridge_cleanup(void)
 {
+    if (!g_started) return;
+
     stop_audio_recording();
 
     g_started = 0;
@@ -806,7 +814,6 @@ static void bridge_cleanup(void)
 int convai_bridge_stop(void)
 {
     if (!g_engine) return -1;
-    if (!g_started) return 0;
 
     bridge_cleanup();
 
