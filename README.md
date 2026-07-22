@@ -118,7 +118,7 @@ ai-hardware-agent-examples
 
 从以下地址下载 AI Hardware Agent SDK 发布包：
 
-> **下载地址：** `https://download.huaweicloud-koophone.com/ai-hardware-agent-sdk/ai-hardware-agent-sdk.26.6.0.tar`
+> **下载地址：** `https://download.huaweicloud-koophone.com/ai-hardware-agent-sdk/ai-hardware-agent-sdk.26.6.2.tar`
 
 SDK 包内容：
 
