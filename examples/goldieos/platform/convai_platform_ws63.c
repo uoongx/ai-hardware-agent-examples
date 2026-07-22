@@ -36,6 +36,8 @@ struct convai_mutex_s {
 
 struct convai_thread_s {
     void *handle;
+    goldie_sem exit_sem;
+    int exited;
 };
 
 struct convai_socket_s {
@@ -139,8 +141,14 @@ static int ws63_thread_wrapper(void *data) {
     void **args = (void **)data;
     convai_thread_func_t func = (convai_thread_func_t)args[0];
     void *arg = args[1];
+    convai_thread_t *thread = (convai_thread_t *)args[2];
     goldie_free(args);
     if (func) func(arg);
+    /* notify thread exit for join/destroy */
+    if (thread) {
+        thread->exited = 1;
+        goldie_sem_post(&thread->exit_sem);
+    }
     return 0;
 }
 
@@ -150,29 +158,50 @@ static int ws63_thread_create(convai_thread_t **thread,
     (void)priority;
     if (thread == NULL || func == NULL) return -1;
 
-    void **args = (void**)goldie_malloc(2 * sizeof(void*));
-    if (args == NULL) return -1;
+    convai_thread_t *t = (convai_thread_t*)goldie_malloc(sizeof(*t));
+    if (t == NULL) return -1;
+    memset(t, 0, sizeof(*t));
+
+    void **args = (void**)goldie_malloc(3 * sizeof(void*));
+    if (args == NULL) {
+        goldie_free(t);
+        return -1;
+    }
     args[0] = (void*)func;
     args[1] = arg;
+    args[2] = (void*)t;
 
     unsigned int ss = stack_size > 0 ? stack_size : 4096;
     const char *n = name ? name : "convai";
 
-    *thread = (convai_thread_t*)goldie_thread_create(
+    goldie_sem_init(&t->exit_sem);
+
+    t->handle = goldie_thread_create(
         (goldie_thread_handler)ws63_thread_wrapper, args, n, ss);
-    if (*thread == NULL) {
+    if (t->handle == NULL) {
+        goldie_sem_destroy(&t->exit_sem);
         goldie_free(args);
+        goldie_free(t);
         return -1;
     }
+
+    *thread = t;
     return 0;
 }
 
+/* wait for thread to call exit_sem_post */
 static void ws63_thread_join(convai_thread_t *thread) {
-    (void)thread;
+    if (thread == NULL) return;
+    goldie_sem_wait(&thread->exit_sem);
 }
 
+/* safe destroy: wait if thread not exited, then release resources */
 static void ws63_thread_destroy(convai_thread_t *thread) {
     if (thread == NULL) return;
+    if (!thread->exited) {
+        goldie_sem_wait(&thread->exit_sem);
+    }
+    goldie_sem_destroy(&thread->exit_sem);
     goldie_free(thread);
 }
 
