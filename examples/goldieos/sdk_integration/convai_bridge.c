@@ -544,6 +544,15 @@ static const char *cfg_or(const char *key, const char *fallback)
  */
 static const char *bridge_build_config_json(char *buf, size_t buf_size)
 {
+    /* device_name priority: WiFi MAC > config file > default */
+    char dn_buf[32] = {0};
+    const char *dn = NULL;
+    if (ws63_device_id(dn_buf, sizeof(dn_buf)) > 0) {
+        dn = dn_buf;
+    } else {
+        dn = cfg_or("device_name", BRIDGE_DEFAULT_DEVICE_NAME);
+    }
+
     int n = snprintf(buf, buf_size,
         "{"
             "\"info\":{"
@@ -557,11 +566,11 @@ static const char *bridge_build_config_json(char *buf, size_t buf_size)
                     "\"codec\":%d"
                 "}"
             "}"
-        "}", 
+        "}",
         cfg_or("product_id",      BRIDGE_DEFAULT_PRODUCT_ID),
         cfg_or("product_key",     BRIDGE_DEFAULT_PRODUCT_KEY),
         cfg_or("product_secret",  BRIDGE_DEFAULT_PRODUCT_SECRET),
-        cfg_or("device_name",     BRIDGE_DEFAULT_DEVICE_NAME),
+        dn,
         0
     );
     (void)n; /* truncation is acceptable — engine will reject malformed JSON */

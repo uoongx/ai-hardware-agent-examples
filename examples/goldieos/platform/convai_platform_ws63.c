@@ -310,8 +310,29 @@ static void ws63_log(int level, const char *file, int line, const char *fmt, ...
     printf("%s", buf);
 }
 
-static int ws63_device_id(char *buf, size_t len) {
-    if (buf == NULL || len == 0) return -1;
+int ws63_device_id(char *buf, size_t len) {
+    if (buf == NULL || len < 18) return -1;
+
+    WifiService *wifi_svc = (WifiService *)get_service(WIFI_SERVICE_INDEX);
+    if (wifi_svc != NULL && wifi_svc->svr_get_hwddr != NULL) {
+        uint8_t hw_addr[6] = {0};
+        if (wifi_svc->svr_get_hwddr(hw_addr, 6) == 0) {
+            int is_valid = 0;
+            for (int i = 0; i < 6; i++) {
+                if (hw_addr[i] != 0x00 && hw_addr[i] != 0xFF) {
+                    is_valid = 1;
+                    break;
+                }
+            }
+            if (is_valid) {
+                snprintf(buf, len, "%02X%02X%02X%02X%02X%02X",
+                         hw_addr[0], hw_addr[1], hw_addr[2],
+                         hw_addr[3], hw_addr[4], hw_addr[5]);
+                return (int)strlen(buf);
+            }
+        }
+    }
+
     snprintf(buf, len, "ws63-device");
     return (int)strlen(buf);
 }
